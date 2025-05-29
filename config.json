@@ -1,0 +1,6 @@
+{
+  "target_user": "twitteruser",         // 監視するTwitterユーザー（@なし）
+  "monitoring": true,                   // 通知ON/OFF
+  "polling_interval": 60,               // 取得間隔（秒）
+  "admins": [123456789012345678]        // 管理者のDiscordユーザーIDリスト
+}
