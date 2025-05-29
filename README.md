@@ -2,88 +2,87 @@
 
 # 📡 Twitter → Discord 通知Bot
 
-このBotは、指定されたTwitterユーザーのツイートを定期的に取得し、Discordに自動で通知するBotです。
+このBotは、指定したTwitterユーザーのツイートを定期的に取得し、Discordチャンネルに自動で投稿するBotです。
 
 ---
 
-## 📁 構成ファイル一覧
+## 📁 ファイル構成
 
 project/
-├── bot.py # メインのBotスクリプト
-├── config.json # 設定ファイル（永続化）
-├── .env # 認証トークンなどを記載
+├── bot.py # メインのBotスクリプト（トークン等を直書き）
+├── config.json # 設定ファイル（監視ユーザー・状態・間隔など）
 └── README.md # このファイル
 
 
 ---
 
-## 🔐 `.env` ファイルの内容
+## 🔐 トークンの設定方法
 
-プロジェクトのルートに `.env` ファイルを作成し、以下のように記述します：
+`bot.py` の先頭付近で以下のようにトークンなどを直接記述してください：
 
-```env
-DISCORD_TOKEN=your_discord_bot_token
-BEARER_TOKEN=your_twitter_bearer_token
-CHANNEL_ID=123456789012345678  # 通知を送るDiscordチャンネルID
+```python
+DISCORD_TOKEN = "あなたのDiscord Botトークン"
+BEARER_TOKEN = "あなたのTwitter API Bearerトークン"
+CHANNEL_ID = 123456789012345678  # 通知を送るDiscordチャンネルID（整数で記述）
 
-⚙️ config.json
-
-Botの動作設定ファイルです（コマンドで変更可能、起動時に読み込まれます）：
+⚙️ config.json の例
 
 {
-  "target_user": "twitteruser",            // 監視対象（@なし）
+  "target_user": "twitteruser",            // 監視対象のTwitterユーザー名（@なし）
   "monitoring": true,                      // 通知ON/OFF
-  "polling_interval": 60,                  // ツイート取得間隔（秒）
-  "admins": [123456789012345678]           // 管理者のDiscordユーザーID
+  "polling_interval": 60,                  // 取得間隔（秒）
+  "admins": [123456789012345678]           // 管理者ユーザーIDの配列（整数）
 }
 
-📦 依存パッケージ
+    admins で指定されたDiscordユーザーのみがBotの管理コマンドを使用できます。
 
-Python 3.12+ 対応済み。以下のライブラリをインストール：
+📦 インストールが必要なパッケージ
 
-pip install discord.py aiohttp python-dotenv
+以下をインストールしてください：
 
-🚀 起動手順
+pip install discord.py aiohttp
 
-    .env にトークンとチャンネルIDを記述
+🚀 Botの起動方法
+
+    bot.py にトークンなどを記入
 
     config.json を作成
 
-    パッケージをインストール
+    必要なパッケージをインストール
 
-    以下で起動：
+    Botを起動：
 
 python bot.py
 
-🛠 コマンド一覧（Discord内）
+💬 使用可能なコマンド一覧
 コマンド	権限	内容
 !help-twitterbot	全員	コマンド一覧を表示
-!status	全員	現在の設定状態を表示
-!fetch	全員	手動でツイート取得
-!setuser <ユーザー名>	管理者	監視ユーザーを変更
+!status	全員	現在の監視設定とステータスを表示
+!fetch	全員	手動でTwitter投稿を即時取得・通知
+!setuser <ユーザー名>	管理者	監視するTwitterユーザーを変更
 !on	管理者	通知をONにする
 !off	管理者	通知をOFFにする
-!interval <秒数>	管理者	取得間隔を設定（例：!interval 300）
+!interval <秒数>	管理者	ツイート取得間隔を変更（例：!interval 300）
 🔄 動作仕様
 
-    取得間隔内に投稿されたツイートのみ取得・送信。
+    指定された「取得間隔（秒）」に基づき、その時間内に投稿されたツイートのみを取得。
 
-    初回起動でも過去全件取得は行われず、現在時刻を基準に取得。
+    初回起動時にも過去すべての投稿は取得されず、過去◯秒以内に限定。
 
-    ツイートが複数ある場合もすべてDiscordに通知。
+    重複送信はありません。
 
-    重複通知は発生しません（時間フィルタにより制御）。
+    間隔中に複数投稿があった場合も、すべて通知されます。
 
 📌 注意事項
 
-    複数アカウント監視や複数チャンネル通知は未対応（今後拡張可能）。
+    管理者は Discord の「ユーザーID」で指定（開発者モードでコピー）。
 
-    管理者はDiscordの「ユーザーID」で指定（右クリック→IDコピー）。
+    bot.py にトークンを直書きするため、ソースの取り扱いには注意してください。
 
-    .env は .gitignore に追加して、公開リポジトリでは管理しないでください。
+    公開リポジトリなどにアップロードしないようにしましょう。
 
 🧪 テスト方法
 
-    !fetch を使えば即時に最新ツイートを取得・通知可能です。
+    !fetch コマンドで即時にツイート取得テストができます。
 
-    config.json を手動編集した後はBotの再起動が必要です。
+    config.json を手動で編集した場合は、Botの再起動が必要です。
