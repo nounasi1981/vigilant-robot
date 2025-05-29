@@ -1,163 +1,165 @@
 import discord
+import aiohttp
 import asyncio
 import json
-import aiohttp
-from discord.ext import tasks
-from datetime import datetime, timedelta, timezone
+import datetime
 
-# ===== 設定読み込み・保存 =====
-CONFIG_PATH = "config.json"
+# ==== 設定（トークン直書き） ====
+DISCORD_TOKEN = "あなたのDiscord Botトークン"
+BEARER_TOKEN = "あなたのTwitter API Bearerトークン"
+CHANNEL_ID = 123456789012345678  # DiscordチャンネルID（整数）
+
+# ==== 設定ファイルの読み書き ====
+CONFIG_FILE = "config.json"
 
 def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_config():
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+def save_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
 config = load_config()
 
-# ===== Discord設定 =====
-DISCORD_TOKEN = "YOUR_DISCORD_TOKEN"
-CHANNEL_ID = 123456789012345678  # 通知先チャンネルID
+# ==== Discordクライアント ====
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# ===== Twitter API設定 =====
-BEARER_TOKEN = "YOUR_TWITTER_BEARER_TOKEN"
-HEADERS = {
-    "Authorization": f"Bearer {BEARER_TOKEN}"
-}
-
-# 最後にチェックした時刻（UTC）
-last_checked = datetime.now(timezone.utc) - timedelta(seconds=config.get("polling_interval", 60))
-
-def is_admin(user_id):
-    return user_id in config.get("admins", [])
-
-async def fetch_tweets():
-    global last_checked
-    username = config.get("target_user")
-    if not username:
-        return []
-
-    since_time = last_checked
-    last_checked = datetime.now(timezone.utc)
-
+# ==== Twitter API 経由でツイート取得 ====
+async def fetch_tweets(username, since_time):
+    headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
     url = (
-        f"https://api.twitter.com/2/tweets/search/recent"
-        f"?query=from:{username}"
-        f"&tweet.fields=created_at,attachments"
-        f"&expansions=attachments.media_keys,referenced_tweets.id,author_id"
-        f"&media.fields=preview_image_url,url,type"
+        f"https://api.twitter.com/2/users/by/username/{username}"
+        f"?user.fields=id"
     )
-
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=HEADERS) as resp:
-            if resp.status != 200:
-                print("Twitter API Error", await resp.text())
-                return []
+        async with session.get(url, headers=headers) as resp:
             data = await resp.json()
-            tweets = data.get("data", [])
+            if "data" not in data:
+                return []
+            user_id = data["data"]["id"]
 
-            # フィルタリング: 取得間隔中のツイートだけ
-            recent_tweets = []
-            for tweet in tweets:
-                created_at = datetime.fromisoformat(tweet["created_at"].replace("Z", "+00:00"))
-                if since_time <= created_at <= last_checked:
-                    recent_tweets.append(tweet)
+        now = datetime.datetime.utcnow()
+        start_time = (now - datetime.timedelta(seconds=config["polling_interval"])).isoformat("T") + "Z"
+        timeline_url = (
+            f"https://api.twitter.com/2/users/{user_id}/tweets"
+            f"?tweet.fields=created_at,referenced_tweets,attachments"
+            f"&expansions=attachments.media_keys,referenced_tweets.id,referenced_tweets.id.author_id"
+            f"&media.fields=url,preview_image_url,type"
+            f"&start_time={start_time}"
+            f"&exclude=replies"
+        )
+        async with session.get(timeline_url, headers=headers) as resp:
+            tweets_data = await resp.json()
+            tweets = tweets_data.get("data", [])
+            includes = tweets_data.get("includes", {})
+            media_map = {m["media_key"]: m for m in includes.get("media", [])}
+            return tweets, media_map
 
-            return recent_tweets
-
-async def send_tweet(tweet):
-    tweet_id = tweet["id"]
-    url = f"https://twitter.com/{config.get('target_user')}/status/{tweet_id}"
+# ==== 通知処理 ====
+async def notify_tweets():
+    await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
-    if channel:
-        await channel.send(url)
+    while not client.is_closed():
+        if config.get("monitoring", False):
+            for username in config.get("target_users", []):
+                try:
+                    tweets, media_map = await fetch_tweets(username, config["polling_interval"])
+                    for tweet in reversed(tweets):  # 時系列順に
+                        text = tweet.get("text", "")
+                        url = f"https://twitter.com/{username}/status/{tweet['id']}"
+                        content = f"**{username} の新しいツイート**\n{text}\n{url}"
+                        files = []
+                        if "attachments" in tweet and "media_keys" in tweet["attachments"]:
+                            for key in tweet["attachments"]["media_keys"]:
+                                media = media_map.get(key)
+                                if media and media["type"] in ["photo", "video"]:
+                                    content += f"\n{media.get('url', media.get('preview_image_url', ''))}"
+                        await channel.send(content)
+                except Exception as e:
+                    print(f"[ERROR] {username} のツイート取得に失敗: {e}")
+        await asyncio.sleep(config["polling_interval"])
 
-@tasks.loop(seconds=60)
-async def check_tweets():
-    if not config.get("monitoring", True):
-        return
-    tweets = await fetch_tweets()
-    for tweet in reversed(tweets):
-        await send_tweet(tweet)
-
-@client.event
-async def on_ready():
-    print(f"Bot logged in as {client.user}")
-    check_tweets.change_interval(seconds=config.get("polling_interval", 60))
-    check_tweets.start()
-
+# ==== 管理コマンド ====
 @client.event
 async def on_message(message):
-    global last_checked
-
     if message.author.bot:
         return
+
     content = message.content.strip()
+    is_admin = message.author.id in config.get("admins", [])
 
     if content == "!help-twitterbot":
-        help_msg = (
-            "📘 **Twitter通知Bot コマンド一覧**\n"
-            "!help-twitterbot - このメッセージを表示\n"
-            "!status - 現在の状態を表示\n"
-            "!fetch - 手動でツイートを取得して送信\n"
-            "（以下は管理者のみ）\n"
-            "!setuser <ユーザー名> - 監視対象ユーザー変更\n"
-            "!on - 通知ON\n"
-            "!off - 通知OFF\n"
-            "!interval <秒> - 取得間隔を変更"
+        help_text = (
+            "**🛠 コマンド一覧:**\n"
+            "`!help-twitterbot` - このヘルプを表示\n"
+            "`!status` - 現在の設定状況を表示\n"
+            "`!fetch` - 手動でツイート取得\n"
+            "`!on` / `!off` - 通知の有効化/無効化（管理者）\n"
+            "`!setuser ユーザー1 ユーザー2 ...` - 監視ユーザーを設定（管理者）\n"
+            "`!interval 秒数` - 取得間隔を変更（管理者）"
         )
-        await message.channel.send(help_msg)
+        await message.channel.send(help_text)
 
     elif content == "!status":
-        status = (
-            f"🔎 監視対象: `{config.get('target_user')}`\n"
-            f"📡 通知: {'ON' if config.get('monitoring') else 'OFF'}\n"
-            f"⏱ 間隔: {config.get('polling_interval', 60)}秒"
+        status = "ON ✅" if config.get("monitoring") else "OFF ❌"
+        users = ", ".join(config.get("target_users", []))
+        interval = config.get("polling_interval", 60)
+        await message.channel.send(
+            f"**Botステータス:** {status}\n**監視ユーザー:** {users}\n**取得間隔:** {interval}秒"
         )
-        await message.channel.send(status)
 
     elif content == "!fetch":
         await message.channel.send("⏳ ツイートを取得中...")
-        tweets = await fetch_tweets()
-        if not tweets:
-            await message.channel.send("🚫 新しいツイートはありません。")
-        for tweet in reversed(tweets):
-            await send_tweet(tweet)
+        for username in config.get("target_users", []):
+            try:
+                tweets, media_map = await fetch_tweets(username, config["polling_interval"])
+                if not tweets:
+                    await message.channel.send(f"{username}：新しいツイートはありません。")
+                    continue
+                for tweet in reversed(tweets):
+                    text = tweet.get("text", "")
+                    url = f"https://twitter.com/{username}/status/{tweet['id']}"
+                    content = f"**{username} の新しいツイート**\n{text}\n{url}"
+                    if "attachments" in tweet and "media_keys" in tweet["attachments"]:
+                        for key in tweet["attachments"]["media_keys"]:
+                            media = media_map.get(key)
+                            if media and media["type"] in ["photo", "video"]:
+                                content += f"\n{media.get('url', media.get('preview_image_url', ''))}"
+                    await message.channel.send(content)
+            except Exception as e:
+                await message.channel.send(f"⚠️ {username} の取得中にエラーが発生しました: {e}")
 
-    elif content.startswith("!setuser") and is_admin(message.author.id):
-        parts = content.split()
-        if len(parts) >= 2:
-            config["target_user"] = parts[1]
-            save_config()
-            await message.channel.send(f"✅ 監視ユーザーを `{parts[1]}` に設定しました。")
-
-    elif content == "!on" and is_admin(message.author.id):
+    elif content == "!on" and is_admin:
         config["monitoring"] = True
-        save_config()
-        await message.channel.send("✅ 通知をONにしました。")
+        save_config(config)
+        await message.channel.send("✅ 通知を有効にしました。")
 
-    elif content == "!off" and is_admin(message.author.id):
+    elif content == "!off" and is_admin:
         config["monitoring"] = False
-        save_config()
-        await message.channel.send("🛑 通知をOFFにしました。")
+        save_config(config)
+        await message.channel.send("🛑 通知を無効にしました。")
 
-    elif content.startswith("!interval") and is_admin(message.author.id):
-        parts = content.split()
-        if len(parts) >= 2 and parts[1].isdigit():
-            sec = int(parts[1])
+    elif content.startswith("!setuser") and is_admin:
+        users = content.split()[1:]
+        if not users:
+            await message.channel.send("⚠️ ユーザー名を指定してください。")
+            return
+        config["target_users"] = users
+        save_config(config)
+        await message.channel.send(f"✅ 監視ユーザーを更新しました：{', '.join(users)}")
+
+    elif content.startswith("!interval") and is_admin:
+        try:
+            sec = int(content.split()[1])
             config["polling_interval"] = sec
-            save_config()
-            check_tweets.change_interval(seconds=sec)
-            await message.channel.send(f"⏱ 取得間隔を {sec} 秒に変更しました。")
+            save_config(config)
+            await message.channel.send(f"⏱ 取得間隔を {sec} 秒に設定しました。")
+        except:
+            await message.channel.send("⚠️ 正しい秒数を指定してください。")
 
-            # 最後取得時刻を再設定して、次のチェックで重複取得しないように
-            global last_checked
-            last_checked = datetime.now(timezone.utc) - timedelta(seconds=sec)
-
+# ==== 起動 ====
+client.loop.create_task(notify_tweets())
 client.run(DISCORD_TOKEN)
